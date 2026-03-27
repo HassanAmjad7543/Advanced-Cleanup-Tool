@@ -1,0 +1,19 @@
+# User-specific logs
+cleanup_log.txt
+
+# PowerShell temporary files
+*.log
+*.tmp
+*.bak
+
+# Windows-specific files
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# VS Code settings (if you use it)
+.vscode/
+
+# Project-specific metadata (optional)
+.antigravity/
+.gemini/
