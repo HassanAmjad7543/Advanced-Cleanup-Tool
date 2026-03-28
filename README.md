@@ -1,4 +1,4 @@
-# 🚀 Universal Software Guardian (v20.0 - Professional Clean)
+# 🚀 Universal Software Guardian (v1.0 - Professional Clean)
 
 A powerful, high-performance PowerShell tool designed to completely uninstall software and permanently eradicate all residual files, folders, and registry keys from a Windows system.
 
