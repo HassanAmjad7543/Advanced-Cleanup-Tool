@@ -33,8 +33,8 @@ function Get-UserSelection {
         Write-Host "  $($i + 1). $($Items[$i])" -ForegroundColor $c
     }
     Write-Host "  (Type 'all', 'n', or numbers like '1,3')" -ForegroundColor Gray
-    $UserChoice = Read-Host "Choice"
-    if ($UserChoice -eq 'all') { return $Items }
+    $UserChoice = (Read-Host "Choice").Trim()
+    if ($UserChoice -eq 'all') { return [string[]]$Items }
     if ($UserChoice -eq 'n' -or $UserChoice -eq '') { return @() }
     $selected = New-Object System.Collections.Generic.List[string]
     foreach ($idx in ($UserChoice -split ',')) {
@@ -63,8 +63,12 @@ if ($SoftwareName.Length -lt 3) {
     exit
 }
 
-$StrictRegex = "(?i)\b$SoftwareName"
-$FolderRegex = "(?i)^\.?\b$SoftwareName"
+# Convert any input space, hyphen, or underscore so it seamlessly matches variations like ".lmstudio"
+$EscapedName = [regex]::Escape($SoftwareName)
+$SearchPattern = $EscapedName -replace '(\\ |-|_)+', '[\s\-_]*'
+
+$StrictRegex = "(?i)\b$SearchPattern"
+$FolderRegex = "(?i)^\.?\b$SearchPattern"
 
 Write-Log "========== SOFTWARE CLEANUP: $SoftwareName ==========" "Cyan"
 if ($DryRun) { Write-Log "[DRY RUN MODE ACTIVE]" "Magenta" }
@@ -84,7 +88,17 @@ if ($appsFound) {
         Write-Log "FOUND: $($app.DisplayName)" "Green"
         if ($DryRun) { continue }
         $ans = Read-Host "Run uninstaller? (y/n)"
-        if ($ans -eq 'y') { Start-Process cmd -ArgumentList "/c $($app.UninstallString)" -Wait }
+        if ($ans -eq 'y') { 
+            Write-Log "Launching UNINSTALLER for $($app.DisplayName)..." "Cyan"
+            try {
+                Start-Process cmd.exe -ArgumentList "/c `"$($app.UninstallString)`"" -Wait -ErrorAction Stop
+            } catch {
+                Write-Log "Failed to launch uninstaller. You may need to run it manually." "Red"
+            }
+            Write-Host " "
+            Write-Log "WAITING FOR UNINSTALLER TO FINISH..." "Magenta"
+            Read-Host "Press ENTER ONLY AFTER the uninstaller window has completely closed"
+        }
     }
 }
 
@@ -136,10 +150,11 @@ foreach ($h in "LocalMachine", "CurrentUser") {
         $p = [int](($i / $subs.Count) * 100)
         Write-Progress -Activity "[SCAN] Registry Scan" -Status "$p% - $n" -PercentComplete $p
         if ($GlobalExclusionList -contains $n) { continue }
-        if ($n -match $StrictRegex) { $regItems += "HKEY_$($h.ToUpper())\Software\$n" }
+        $hPrefix = if ($h -eq "LocalMachine") { "HKEY_LOCAL_MACHINE" } else { "HKEY_CURRENT_USER" }
+        if ($n -match $StrictRegex) { $regItems += "$hPrefix\Software\$n" }
         try {
             $k = $base.OpenSubKey($n)
-            foreach ($s in $k.GetSubKeyNames()) { if ($s -match $StrictRegex) { $regItems += "HKEY_$($h.ToUpper())\Software\$n\$s" } }
+            foreach ($s in $k.GetSubKeyNames()) { if ($s -match $StrictRegex) { $regItems += "$hPrefix\Software\$n\$s" } }
             $k.Close()
         } catch {}
     }
@@ -178,10 +193,11 @@ foreach ($h in "LocalMachine", "CurrentUser") {
         $p = [int](($i / $subs.Count) * 100)
         Write-Progress -Activity "[VERIFY] Registry" -Status "$p% - $n" -PercentComplete $p
         if ($GlobalExclusionList -contains $n) { continue }
-        if ($n -match $StrictRegex) { $rem += "HKEY_$($h.ToUpper())\Software\$n [REGISTRY KEY]" }
+        $hPrefix = if ($h -eq "LocalMachine") { "HKEY_LOCAL_MACHINE" } else { "HKEY_CURRENT_USER" }
+        if ($n -match $StrictRegex) { $rem += "$hPrefix\Software\$n [REGISTRY KEY]" }
         try {
             $k = $base.OpenSubKey($n)
-            foreach ($s in $k.GetSubKeyNames()) { if ($s -match $StrictRegex) { $rem += "HKEY_$($h.ToUpper())\Software\$n\$s [REGISTRY KEY]" } }
+            foreach ($s in $k.GetSubKeyNames()) { if ($s -match $StrictRegex) { $rem += "$hPrefix\Software\$n\$s [REGISTRY KEY]" } }
             $k.Close()
         } catch {}
     }
@@ -197,6 +213,7 @@ if ($rem.Count -gt 0) {
             Write-Log "Force Deleting Key: $cItem" "Red"
             Remove-Item -LiteralPath $pPath -Recurse -Force -ErrorAction SilentlyContinue
             if (Test-Path -LiteralPath $pPath) {
+                Write-Log "Using CMD Registry Fallback..." "Red"
                 cmd.exe /c "reg delete `"$cItem`" /f >nul 2>&1"
             }
         } else {
