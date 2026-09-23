@@ -2,6 +2,32 @@
 
 All notable changes to Universal Software Guardian are listed here.
 
+## [2.5] - 2026-09-23
+
+v2.5 lets you pick the program to remove from a list instead of typing its name, and makes the window faster and smoother.
+
+### Added
+- **Installed programs list**: the app opens on every installed program (the same entries "Apps & features" shows).
+  - Each row shows the program's icon, name, publisher, version and size. Type in the search box to filter.
+  - Double-click a program, or select it and press **Scan**, to scan for it. Its install folder is added to the results even when its name doesn't match.
+  - Icons come from the program's DisplayIcon, the icon Windows Installer keeps for MSI installs, or an .exe in its install folder named like the program.
+  - Sizes come from the registry, or from measuring the install folder when the program doesn't record one (e.g. IDM, OBS, VLC, WinRAR).
+- **Back button** to return from the results to the program list. The top button reads **Rescan** on the results screen, and **Clean selected** only appears when there is something to clean.
+
+### Changed
+- **Neutral black theme** (background levels #121212 → #2D2D2D, blue #2A74E0) instead of the blue-grey one.
+- **Redesigned drive list**: each drive shows its label, free space and a usage bar. The system drive is shown ticked and locked, and clicking anywhere on a row ticks it.
+- **Faster, smoother window**:
+  - Icons and sizes load on a background thread, so the window never freezes (it used to block for ~30 s the first time the list was drawn).
+  - Program rows are drawn in compiled C# and reused, so scrolling no longer stutters (a list repaint went from ~318 ms to under ~40 ms on the test PC).
+  - The window stays hidden until it has fully painted, so it never shows white blocks on opening.
+  - The drive list reads drives with .NET `DriveInfo` instead of WMI (~1.5 s → instant).
+  - The C# part is compiled once and cached in `%TEMP%`, making startup ~0.5 s faster.
+
+### Fixed
+- Icons stored as PNG inside .ico files (e.g. Git's) were drawn as coloured noise.
+- Large Electron apps (Discord, VS Code, Obsidian) took 1–2 s each to load their icon.
+
 ## [2.0] - 2026-09-23
 
 v2.0 replaces the console script with a desktop window, makes scanning about 10x faster, and makes deletion report what really happened.

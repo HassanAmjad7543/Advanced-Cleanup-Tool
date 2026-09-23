@@ -1,4 +1,4 @@
-param(
+﻿param(
     # Where cleanup_log.txt goes; SoftwareGuardian.exe passes its own folder.
     [string]$LogDir = $PSScriptRoot
 )
@@ -24,11 +24,11 @@ function Hex([string]$H) { [System.Drawing.ColorTranslator]::FromHtml($H) }
 # Display scale (1.5 at 150%). The layout is written for 96 DPI and scaled once; owner-drawn parts use Px.
 $Dpi = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero).DpiX / 96
 function Px([float]$V) { [int]($V * $Dpi) }
-$Palette = @{ White = '#E6E8EB'; Gray = '#6B7482'; Cyan = '#5EB1FF'; Green = '#4ADE80'; Red = '#FF7B7B'; Yellow = '#F2C94C'; Orange = '#FF9E64' }
+$Palette = @{ White = '#E0E0E0'; Gray = '#6C6C6C'; Cyan = '#2A74E0'; Green = '#34A062'; Red = '#C0303C'; Yellow = '#C2900F'; Orange = '#E36A3A' }
 $Tags = @{
-    Uninstaller = @{ Tag = 'UNINST'; Color = '#FF9E64'; Group = 'Uninstallers' }
-    Folder      = @{ Tag = 'DIR';    Color = '#F2C94C'; Group = 'Folders' }
-    Registry    = @{ Tag = 'REG';    Color = '#4FD1C5'; Group = 'Registry keys' }
+    Uninstaller = @{ Tag = 'UNINST'; Color = '#E36A3A'; Group = 'Uninstallers' }
+    Folder      = @{ Tag = 'DIR';    Color = '#C2900F'; Group = 'Folders' }
+    Registry    = @{ Tag = 'REG';    Color = '#5A7FA3'; Group = 'Registry keys' }
 }
 $Mono = if ([System.Drawing.FontFamily]::Families.Name -contains 'Cascadia Mono') { 'Cascadia Mono' } else { 'Consolas' }
 $Fonts = @{
@@ -47,6 +47,8 @@ $Icons = @{
     Search  = 'M18 11 C18 14.87 14.87 18 11 18 C7.13 18 4 14.87 4 11 C4 7.13 7.13 4 11 4 C14.87 4 18 7.13 18 11 Z M16 16 L21 21'
     Refresh = 'M20 12 C20 16.42 16.42 20 12 20 C7.58 20 4 16.42 4 12 C4 7.58 7.58 4 12 4 C14.5 4 16.7 5.1 18.2 6.9 M18.5 2.5 L18.5 7.5 L13.5 7.5'
     Trash   = 'M4 7 L20 7 M9 7 L9 4 L15 4 L15 7 M6 7 L7 20 L17 20 L18 7 M10 11 L10 16.5 M14 11 L14 16.5'
+    App     = 'M4 5 L20 5 L20 19 L4 19 Z M4 9 L20 9'
+    Back    = 'M20 12 L5 12 M11 6 L5 12 L11 18'
 }
 
 function Draw-Svg($G, [string]$D, [float]$X, [float]$Y, [float]$Size, [string]$Color, [float]$Stroke = 2) {
@@ -169,7 +171,6 @@ function Force-DeleteRegistryKey {
 # before any program gets to lock it again. Needs Administrator (the queue lives in HKLM).
 function Register-DeleteOnReboot {
     param([string]$TargetPath)
-    Add-Type -Namespace Win32 -Name Native -MemberDefinition '[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern bool MoveFileEx(string src, string dst, int flags);'
     $files = [System.Collections.Generic.List[string]]::new()
     $dirs  = [System.Collections.Generic.List[string]]::new()
     $stack = [System.Collections.Generic.Stack[string]]::new(); $stack.Push($TargetPath)
@@ -184,7 +185,7 @@ function Register-DeleteOnReboot {
     }
     $dirs.Reverse()   # boot-time deletes run in queue order: files, then folders deepest-first
     # 4 = MOVEFILE_DELAY_UNTIL_REBOOT; a NULL destination means "delete".
-    $failed = @(@($files) + @($dirs) | Where-Object { -not [Win32.Native]::MoveFileEx($_, [NullString]::Value, 4) }).Count
+    $failed = @(@($files) + @($dirs) | Where-Object { -not [Win32.Ui]::MoveFileEx($_, [NullString]::Value, 4) }).Count
     if ($failed -eq 0) { Write-Log "  QUEUED - will be deleted at next restart: $TargetPath" "Orange" }
     else { Write-Log "  Could not queue $failed item(s) for deletion at restart - run as Administrator." "Red" }
 }
@@ -210,12 +211,57 @@ function Add-Result([string]$Type, [string]$Text, [string]$Value = $Text) {
     $item.Checked = $true
 }
 
+# Windows' "installed programs" lists (64-bit, 32-bit, current user).
+$UninstallKeys = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+                 "HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+                 "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
+
+# Same programs "Apps & features" shows: skips system components, updates and entries with no uninstaller.
+function Get-InstalledPrograms {
+    Get-ItemProperty $UninstallKeys -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -and $_.UninstallString -and $_.SystemComponent -ne 1 -and -not $_.ParentKeyName } |
+        Sort-Object DisplayName -Unique
+}
+
+# Fills the program list with the programs whose name contains the search text.
+function Show-Programs {
+    $f = $nameBox.Text.Trim()
+    $apps.BeginUpdate(); $apps.Items.Clear()
+    foreach ($p in $Programs) {
+        if ($p.DisplayName.IndexOf($f, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $it = $apps.Items.Add($p.DisplayName); $it.Tag = $p
+            [void]$it.SubItems.Add(((@($p.Publisher, $p.DisplayVersion) | Where-Object { $_ }) -join '   '))   # the row's second line
+        }
+    }
+    $apps.EndUpdate()
+    # Program screen: only Scan applies here, so Clean and Back stay hidden.
+    $list.Visible = $cleanBtn.Visible = $backBtn.Visible = $false; $apps.Visible = $true
+    $scanBtn.Text = "Scan"
+    $countLabel.Text = "$($apps.Items.Count) installed - double-click one, or select it and press Scan"
+}
+
+# Scans for a program picked from the list, searching by its name without the version.
+function Select-Program($P) {
+    # "LM Studio 0.4.8+1" -> "LM Studio", "7-Zip 23.01 (x64)" -> "7-Zip"
+    $nameBox.Text = ($P.DisplayName -replace '\s*\(.*?\)|\s+v?\d+(\.\d+)+.*$', '').Trim(' ', '-')
+    $script:Picked = $P   # set after the text: typing clears it
+    Invoke-Scan
+}
+
+# Fills the drives list. The system drive is always scanned, so it's shown ticked and locked.
 function Update-Drives {
+    $was = @($drivesBox.Items | ForEach-Object Tag | Where-Object Pick | ForEach-Object Root)   # keep ticks across Refresh
     $drivesBox.Items.Clear()
-    foreach ($v in Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2 OR DriveType=3" -ErrorAction SilentlyContinue |
-                   Where-Object { $_.DeviceID -ne $env:SystemDrive -and $_.FreeSpace -ne $null }) {
-        $kind = if ($v.DriveType -eq 2) { "usb" } else { "hdd" }
-        [void]$drivesBox.Items.Add(("{0}\  {1}  {2}" -f $v.DeviceID, $kind, $v.VolumeName))
+    # DriveInfo is instant; WMI (Win32_LogicalDisk) took ~1.5 s. IsReady skips empty card readers.
+    foreach ($v in [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -in 'Fixed', 'Removable' }) {
+        $usb = $v.DriveType -eq 'Removable'
+        $d = [pscustomobject]@{
+            Root = $v.Name; System = $v.Name.TrimEnd('\') -eq $env:SystemDrive; Usb = $usb
+            Label = if ($v.VolumeLabel) { $v.VolumeLabel } elseif ($usb) { 'USB drive' } else { 'Local disk' }
+            Free = $v.AvailableFreeSpace / 1GB; Size = $v.TotalSize / 1GB
+            Pick = $v.Name.TrimEnd('\') -eq $env:SystemDrive -or $was -contains $v.Name
+        }
+        $drivesBox.Items.Add($d.Root).Tag = $d
     }
 }
 
@@ -223,22 +269,21 @@ function Update-Drives {
 function Invoke-Scan {
     $name = $nameBox.Text.Trim()
     if ($name.Length -lt 3) { [void][System.Windows.Forms.MessageBox]::Show("Type at least 3 letters of the program name.", $form.Text); return }
-    $list.Items.Clear()
+    $list.Items.Clear(); $apps.Visible = $false; $list.Visible = $cleanBtn.Visible = $backBtn.Visible = $true
+    $scanBtn.Text = "Rescan"
     # Spaces, hyphens and underscores match each other, so "LM Studio" also finds ".lmstudio".
     $pattern = [regex]::Escape($name) -replace '(\\ |-|_)+', '[\s\-_]*'
     $StrictRegex = "(?i)\b$pattern"
     $FolderRx = [regex]::new("^\.?\b$pattern", 'IgnoreCase, Compiled')
     Write-Log "========== SCAN: $name ==========" "Cyan"
 
-    Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
-                     "HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
-                     "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue |
+    Get-ItemProperty $UninstallKeys -ErrorAction SilentlyContinue |
         Where-Object { $_.UninstallString -and (($_.DisplayName -match $StrictRegex) -or ($_.Publisher -match $StrictRegex)) } |
         ForEach-Object { Add-Result "Uninstaller" $_.DisplayName $_.UninstallString }
 
     $searchRoots = @("$env:ProgramFiles", "${env:ProgramFiles(x86)}", "$env:ProgramData",
                      "$env:APPDATA", "$env:LOCALAPPDATA", "$env:USERPROFILE") +
-                   @($drivesBox.CheckedItems | ForEach-Object { ($_ -split '\s+')[0] })
+                   @($drivesBox.Items | ForEach-Object Tag | Where-Object { $_.Pick -and -not $_.System } | ForEach-Object Root)
     $targets = @(foreach ($root in $searchRoots) {
         Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue
         Get-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue   # -Force: C:\ProgramData is hidden
@@ -249,6 +294,13 @@ function Invoke-Scan {
         $t = $targets[$i]
         if ($Excl.Contains($t.Name) -and ($searchRoots -notcontains $t.FullName)) { continue }
         Add-MatchingFolders $t.FullName
+    }
+    # A picked program's own install folder is a sure hit, even when its name doesn't match.
+    # Never a drive root, a search root or a folder that contains one (e.g. AppData).
+    $loc = if ($script:Picked) { "$($script:Picked.InstallLocation)".Trim('"', ' ').TrimEnd('\') }
+    if ($loc -and $loc.Split('\').Count -gt 2 -and (Test-Path -LiteralPath $loc) -and -not $Excl.Contains((Split-Path $loc -Leaf)) -and
+        -not ($searchRoots | Where-Object { $_ -eq $loc -or $_.StartsWith("$loc\", [System.StringComparison]::OrdinalIgnoreCase) })) {
+        [void]$folderSet.Add($loc)
     }
     foreach ($f in $folderSet) { Add-Result "Folder" $f }
 
@@ -301,118 +353,223 @@ function Invoke-Clean {
     Invoke-Scan
     $left = @($list.Items | Where-Object Tag).Count
     Set-Step 3 @($name, "$($items.Count) picked", $(if ($left) { "$left still found" } else { 'verified clean' }))
+    $script:Programs = @(Get-InstalledPrograms)   # the uninstalled program drops off the list
+    Start-ProgramDetails
 }
 
 # ---- Window: design A "Night Sidebar" ----
-Add-Type -Namespace Win32 -Name Ui -MemberDefinition @'
-[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
-[DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] public static extern int SetWindowTheme(IntPtr h, string app, string id);
-[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, string l);
+$cs = @'
+using System; using System.Collections; using System.Collections.Generic; using System.Drawing; using System.Windows.Forms;
+using System.Runtime.InteropServices; using System.Management.Automation;
+namespace Win32 {
+public static class Ui {
+    [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, string l);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool MoveFileEx(string src, string dst, int flags);
+}
+// Draws a program row: icon, name on top, publisher and version below, size on the right.
+// C#, not PowerShell: each PowerShell statement costs ~1 ms here, so a row took ~20 ms and scrolling stuttered.
+// Each row is drawn once into a bitmap and then only copied (BitBlt), since GDI text/icon drawing
+// straight to the screen costs ~5 ms a row on this kind of machine.
+public class AppRow {
+    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
+    [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, int rop);
+    [DllImport("user32.dll")] static extern bool DrawIconEx(IntPtr dc, int x, int y, IntPtr icon, int w, int h, int step, IntPtr brush, int flags);
+    public Hashtable Icons, Sizes;          // filled by the background loader, keyed by program name
+    public Image NoIcon; public Font Name, Small, Mono; public float Dpi = 1;
+    public Color Back, Selected, Text, Dim;
+    Dictionary<string, IntPtr> cache = new Dictionary<string, IntPtr>();   // key -> HBITMAP of the drawn row
+    IntPtr mem = CreateCompatibleDC(IntPtr.Zero);
+    int Px(float v) { return (int)(v * Dpi); }
+    static object Unwrap(object o) { PSObject p = o as PSObject; return p != null ? p.BaseObject : o; }
+    public void Attach(ListView lv) { lv.DrawItem += Draw; lv.Resize += delegate { Clear(); }; }
+    public void Clear() { foreach (IntPtr h in cache.Values) DeleteObject(h); cache.Clear(); }
+    void Draw(object sender, DrawListViewItemEventArgs e) {
+        Rectangle b = e.Bounds; ListViewItem it = e.Item;
+        Icon ico = Unwrap(Icons[it.Text]) as Icon; object mb = Unwrap(Sizes[it.Text]);
+        // A new key (selection, width, icon or size changed) draws the row again.
+        string key = it.Text + "|" + it.Selected + "|" + b.Width + "|" + (ico != null) + "|" + mb;
+        IntPtr bits;
+        if (!cache.TryGetValue(key, out bits)) {
+            using (Bitmap bmp = new Bitmap(b.Width, b.Height)) {
+                using (Graphics g = Graphics.FromImage(bmp)) Paint(g, new Rectangle(0, 0, b.Width, b.Height), it, ico, mb);
+                bits = cache[key] = bmp.GetHbitmap();
+            }
+        }
+        IntPtr hdc = e.Graphics.GetHdc(), old = SelectObject(mem, bits);
+        BitBlt(hdc, b.X, b.Y, b.Width, b.Height, mem, 0, 0, 0xCC0020);   // SRCCOPY
+        SelectObject(mem, old); e.Graphics.ReleaseHdc(hdc);
+    }
+    void Paint(Graphics g, Rectangle b, ListViewItem it, Icon ico, object mb) {
+        using (SolidBrush bg = new SolidBrush(it.Selected ? Selected : Back)) g.FillRectangle(bg, b);
+        int size = Px(28);
+        Rectangle icon = new Rectangle(b.X + Px(14), b.Y + (b.Height - size) / 2, size, size);
+        if (ico != null) {
+            // Through Windows' DrawIconEx: GDI+ DrawIcon turns PNG-compressed icons (e.g. Git's) into noise.
+            // Drawn at the icon's own size on the row colour, then scaled up smoothly.
+            using (Bitmap pic = new Bitmap(ico.Width, ico.Height)) {
+                using (Graphics pg = Graphics.FromImage(pic)) {
+                    pg.Clear(it.Selected ? Selected : Back);
+                    IntPtr dc = pg.GetHdc(); DrawIconEx(dc, 0, 0, ico.Handle, ico.Width, ico.Height, 0, IntPtr.Zero, 3); pg.ReleaseHdc(dc);
+                }
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.DrawImage(pic, icon);
+            }
+        }
+        else g.DrawImage(NoIcon, icon.X + Px(2), icon.Y + Px(2), NoIcon.Width, NoIcon.Height);
+        int half = b.Height / 2;
+        Rectangle top = new Rectangle(icon.Right + Px(12), b.Y, b.Right - icon.Right - Px(120), half);
+        Rectangle bottom = new Rectangle(top.X, b.Y + half, top.Width, half);
+        TextFormatFlags f = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis;
+        TextRenderer.DrawText(g, it.Text, Name, top, Text, f | TextFormatFlags.Bottom);
+        if (it.SubItems.Count > 1) TextRenderer.DrawText(g, it.SubItems[1].Text, Small, bottom, Dim, f);
+        if (mb != null) {
+            Rectangle right = new Rectangle(b.X, b.Y, b.Width - Px(14), b.Height);
+            TextRenderer.DrawText(g, string.Format("{0:N0} MB", Math.Max(1.0, Convert.ToDouble(mb))), Mono, right, Dim,
+                                  f | TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+        }
+    }
+}
+}
 '@
+# Compiling that takes ~2 s, so the DLL is kept in %TEMP% and reused; a code change gives a new file name.
+$dll = Join-Path $env:TEMP ("SoftwareGuardian-{0:X8}.dll" -f $cs.GetHashCode())
+if (-not (Test-Path $dll)) { Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing, ([psobject].Assembly.Location) -TypeDefinition $cs -OutputAssembly $dll }
+Add-Type -Path $dll
 
 $form = New-Object System.Windows.Forms.Form -Property @{
-    Text = "Universal Software Guardian"; ClientSize = New-Object System.Drawing.Size(1000, 680); StartPosition = 'CenterScreen'
-    MinimumSize = New-Object System.Drawing.Size(860, 600); BackColor = Hex '#0E1116'; ForeColor = Hex '#E6E8EB'; Font = $Fonts.Body
-    Icon = [System.Drawing.Icon]::FromHandle((New-SvgIcon $Icons.Shield 32 '#5EB1FF').GetHicon())
+    Text = "Universal Software Guardian"; ClientSize = New-Object System.Drawing.Size(1000, 680)
+    MinimumSize = New-Object System.Drawing.Size(860, 600); BackColor = Hex '#1E1E1E'; ForeColor = Hex '#E0E0E0'; Font = $Fonts.Body
+    Icon = [System.Drawing.Icon]::FromHandle((New-SvgIcon $Icons.Shield 32 '#2A74E0').GetHicon())
 }
 $dark = 1; [void][Win32.Ui]::DwmSetWindowAttribute($form.Handle, 20, [ref]$dark, 4)   # dark title bar (Win10 20H1+)
 
-# Sidebar
-$side = New-Object System.Windows.Forms.Panel -Property @{ Dock = 'Left'; Width = 220; BackColor = Hex '#0A0C10' }
-$side.Add_Paint({ param($s, $e) $e.Graphics.DrawLine((New-Object System.Drawing.Pen (Hex '#1E232D')), $s.Width - 1, 0, $s.Width - 1, $s.Height) })
-$logo = New-Object System.Windows.Forms.PictureBox -Property @{ Left = 20; Top = 22; Size = New-Object System.Drawing.Size(28, 28); Image = New-SvgIcon $Icons.Shield 28 '#5EB1FF' }
-$title = New-Object System.Windows.Forms.Label -Property @{ Text = "Software Guardian"; Left = 54; Top = 25; AutoSize = $true; Font = $Fonts.Title }
-$stepsLabel  = New-Object System.Windows.Forms.Label -Property @{ Text = "STEPS"; Left = 22; Top = 78; AutoSize = $true; Font = $Fonts.Small; ForeColor = Hex '#6B7482' }
-$stepsPanel  = New-Object System.Windows.Forms.Panel -Property @{ Left = 14; Top = 98; Width = 192; Height = 150 }
-$drivesLabel = New-Object System.Windows.Forms.Label -Property @{ Text = "DRIVES"; Left = 22; Top = 268; AutoSize = $true; Font = $Fonts.Small; ForeColor = Hex '#6B7482' }
-$sysDrive    = New-Object System.Windows.Forms.Label -Property @{ Text = "$env:SystemDrive\  system (always)"; Left = 22; Top = 292; AutoSize = $true; Font = $Fonts.Mono; ForeColor = Hex '#6B7482' }
-$drivesBox   = New-Object System.Windows.Forms.CheckedListBox -Property @{
-    Left = 18; Top = 314; Width = 188; Height = 96; CheckOnClick = $true; BorderStyle = 'None'
-    BackColor = Hex '#0A0C10'; ForeColor = Hex '#E6E8EB'; Font = $Fonts.Mono
+# Owner-drawn list with no header and one full-width column. The image list only sets the row height.
+function New-OwnerList([int]$RowHeight, [hashtable]$Props) {
+    $lv = New-Object System.Windows.Forms.ListView -Property ($Props + @{
+        View = 'Details'; HeaderStyle = 'None'; FullRowSelect = $true; MultiSelect = $false; OwnerDraw = $true; BorderStyle = 'None'
+        SmallImageList = New-Object System.Windows.Forms.ImageList -Property @{ ImageSize = New-Object System.Drawing.Size(1, (Px $RowHeight)) }
+    })
+    [void]$lv.Columns.Add('', $lv.Width)
+    $lv.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'NonPublic, Instance').SetValue($lv, $true)
+    $lv.Add_Resize({ $this.Columns[0].Width = $this.ClientSize.Width })
+    $lv
 }
-$drivesBtn = New-Object System.Windows.Forms.Button -Property @{
-    Text = " Refresh"; Left = 22; Top = 418; Width = 104; Height = 32; FlatStyle = 'Flat'; ForeColor = Hex '#5EB1FF'
-    Image = New-SvgIcon $Icons.Refresh 14 '#5EB1FF'; TextImageRelation = 'ImageBeforeText'; Cursor = 'Hand'
-}
-$drivesBtn.FlatAppearance.BorderColor = Hex '#262C37'
-$side.Controls.AddRange(@($logo, $title, $stepsLabel, $stepsPanel, $drivesLabel, $sysDrive, $drivesBox, $drivesBtn))
 
-$script:StepNow = 0; $script:StepSubs = @('type a program name', 'untick what to keep', 'then verify')
+# Sidebar
+$side = New-Object System.Windows.Forms.Panel -Property @{ Dock = 'Left'; Width = 220; BackColor = Hex '#121212' }
+$side.Add_Paint({ param($s, $e) $e.Graphics.DrawLine((New-Object System.Drawing.Pen (Hex '#282828')), $s.Width - 1, 0, $s.Width - 1, $s.Height) })
+$logo = New-Object System.Windows.Forms.PictureBox -Property @{ Left = 20; Top = 22; Size = New-Object System.Drawing.Size(28, 28); Image = New-SvgIcon $Icons.Shield 28 '#2A74E0' }
+$title = New-Object System.Windows.Forms.Label -Property @{ Text = "Software Guardian"; Left = 54; Top = 25; AutoSize = $true; Font = $Fonts.Title }
+$stepsLabel  = New-Object System.Windows.Forms.Label -Property @{ Text = "STEPS"; Left = 22; Top = 78; AutoSize = $true; Font = $Fonts.Small; ForeColor = Hex '#6C6C6C' }
+$stepsPanel  = New-Object System.Windows.Forms.Panel -Property @{ Left = 14; Top = 98; Width = 192; Height = 150 }
+$drivesLabel = New-Object System.Windows.Forms.Label -Property @{ Text = "DRIVES TO SCAN"; Left = 22; Top = 268; AutoSize = $true; Font = $Fonts.Small; ForeColor = Hex '#6C6C6C' }
+$drivesBox   = New-OwnerList 56 @{ Left = 14; Top = 290; Width = 192; Height = 228; BackColor = Hex '#121212' }
+# Row: checkbox, "E:  Label" + USB/SYSTEM tag, free space, then a usage bar.
+$drivesBox.Add_DrawItem({ param($s, $e)
+    $d = $e.Item.Tag; $b = $e.Bounds; $g = $e.Graphics
+    $g.FillRectangle((New-Object System.Drawing.SolidBrush (Hex '#121212')), $b)
+    $g.SmoothingMode = 'AntiAlias'
+    $box = New-Object System.Drawing.Rectangle(($b.X + (Px 8)), ($b.Y + (Px 8)), (Px 16), (Px 16))
+    if ($d.Pick) {
+        $g.FillRectangle((New-Object System.Drawing.SolidBrush (Hex $(if ($d.System) { '#4A4A4A' } else { '#2A74E0' }))), $box)
+        Draw-Svg $g $Icons.Check ($box.X + (Px 2)) ($box.Y + (Px 2)) (Px 12) '#FFFFFF' (Px 2)
+    } else { $g.DrawRectangle((New-Object System.Drawing.Pen (Hex '#4A4A4A')), $box) }
+    $x = $box.Right + (Px 10); $w = $b.Right - $x - (Px 8)
+    $flags = [System.Windows.Forms.TextFormatFlags]'SingleLine, NoPrefix, EndEllipsis, VerticalCenter'
+    $line1 = New-Object System.Drawing.Rectangle($x, ($b.Y + (Px 4)), $w, (Px 24))
+    $tag = if ($d.System) { 'SYSTEM', '#6C6C6C' } elseif ($d.Usb) { 'USB', '#C2900F' }
+    if ($tag) { [System.Windows.Forms.TextRenderer]::DrawText($g, $tag[0], $Fonts.Tag, $line1, (Hex $tag[1]), $flags -bor 'Right'); $line1.Width -= Px 48 }
+    [System.Windows.Forms.TextRenderer]::DrawText($g, ("{0}  {1}" -f $d.Root.TrimEnd('\'), $d.Label), $Fonts.Semi, $line1, (Hex '#E0E0E0'), $flags)
+    $line2 = New-Object System.Drawing.Rectangle($x, ($b.Y + (Px 27)), $w, (Px 16))
+    [System.Windows.Forms.TextRenderer]::DrawText($g, ("{0:N0} GB free of {1:N0} GB" -f $d.Free, $d.Size), $Fonts.Small, $line2, (Hex '#6C6C6C'), $flags)
+    $used = 1 - $d.Free / $d.Size
+    $g.FillRectangle((New-Object System.Drawing.SolidBrush (Hex '#282828')), $x, ($b.Y + (Px 46)), $w, (Px 3))
+    $g.FillRectangle((New-Object System.Drawing.SolidBrush (Hex $(if ($used -gt 0.9) { '#C0303C' } else { '#2A74E0' }))), $x, ($b.Y + (Px 46)), [int]($w * $used), (Px 3))
+})
+# Clicking anywhere on a row ticks it; the system drive can't be unticked. (No native checkboxes: we draw our own.)
+$drivesBox.Add_MouseClick({ param($s, $e)
+    $it = $drivesBox.GetItemAt($e.X, $e.Y)
+    if ($it -and -not $it.Tag.System) { $it.Tag.Pick = -not $it.Tag.Pick; $drivesBox.Invalidate($it.Bounds) }
+})
+$drivesBtn = New-Object System.Windows.Forms.Button -Property @{
+    Text = " Refresh"; Left = 22; Top = 526; Width = 104; Height = 32; FlatStyle = 'Flat'; ForeColor = Hex '#2A74E0'
+    Image = New-SvgIcon $Icons.Refresh 14 '#2A74E0'; TextImageRelation = 'ImageBeforeText'; Cursor = 'Hand'
+}
+$drivesBtn.FlatAppearance.BorderColor = Hex '#333333'
+$side.Controls.AddRange(@($logo, $title, $stepsLabel, $stepsPanel, $drivesLabel, $drivesBox, $drivesBtn))
+
+$StartSubs = 'pick a program', 'untick what to keep', 'then verify'
+$script:StepNow = 0; $script:StepSubs = $StartSubs
 $stepsPanel.Add_Paint({ param($s, $e)
     $g = $e.Graphics; $g.SmoothingMode = 'AntiAlias'
     $names = 'Find', 'Review', 'Clean'
     for ($i = 0; $i -lt 3; $i++) {
         $y = Px ($i * 50); $now = $i -eq $script:StepNow; $done = $i -lt $script:StepNow
         if ($now) {
-            $g.FillRectangle((New-Object System.Drawing.SolidBrush (Hex '#161A22')), 0, $y, $s.Width, (Px 44))
-            $g.FillRectangle((New-Object System.Drawing.SolidBrush (Hex '#5EB1FF')), 0, $y, (Px 3), (Px 44))
+            $g.FillRectangle((New-Object System.Drawing.SolidBrush (Hex '#232323')), 0, $y, $s.Width, (Px 44))
+            $g.FillRectangle((New-Object System.Drawing.SolidBrush (Hex '#2A74E0')), 0, $y, (Px 3), (Px 44))
         }
         $dot = New-Object System.Drawing.Rectangle((Px 12), ($y + (Px 10)), (Px 24), (Px 24))
         if ($done) {
-            $g.FillEllipse((New-Object System.Drawing.SolidBrush (Hex '#4ADE80')), $dot)
-            Draw-Svg $g $Icons.Check ($dot.X + (Px 5)) ($dot.Y + (Px 5)) (Px 14) '#0E1116' (Px 2.2)
+            $g.FillEllipse((New-Object System.Drawing.SolidBrush (Hex '#34A062')), $dot)
+            Draw-Svg $g $Icons.Check ($dot.X + (Px 5)) ($dot.Y + (Px 5)) (Px 14) '#FFFFFF' (Px 2.2)
         } else {
-            if ($now) { $g.FillEllipse((New-Object System.Drawing.SolidBrush (Hex '#5EB1FF')), $dot) }
-            else { $g.DrawEllipse((New-Object System.Drawing.Pen (Hex '#3A4250')), $dot) }
-            [System.Windows.Forms.TextRenderer]::DrawText($g, "$($i + 1)", $Fonts.Semi, $dot, (Hex $(if ($now) { '#0E1116' } else { '#6B7482' })), [System.Windows.Forms.TextFormatFlags]'HorizontalCenter, VerticalCenter')
+            if ($now) { $g.FillEllipse((New-Object System.Drawing.SolidBrush (Hex '#2A74E0')), $dot) }
+            else { $g.DrawEllipse((New-Object System.Drawing.Pen (Hex '#4A4A4A')), $dot) }
+            [System.Windows.Forms.TextRenderer]::DrawText($g, "$($i + 1)", $Fonts.Semi, $dot, (Hex $(if ($now) { '#FFFFFF' } else { '#6C6C6C' })), [System.Windows.Forms.TextFormatFlags]'HorizontalCenter, VerticalCenter')
         }
-        $fg = if ($now -or $done) { '#E6E8EB' } else { '#6B7482' }
+        $fg = if ($now -or $done) { '#E0E0E0' } else { '#6C6C6C' }
         [System.Windows.Forms.TextRenderer]::DrawText($g, $names[$i], $Fonts.Semi, (New-Object System.Drawing.Point((Px 44), ($y + (Px 3)))), (Hex $fg))
-        [System.Windows.Forms.TextRenderer]::DrawText($g, $script:StepSubs[$i], $Fonts.Small, (New-Object System.Drawing.Point((Px 45), ($y + (Px 23)))), (Hex '#6B7482'))
+        [System.Windows.Forms.TextRenderer]::DrawText($g, $script:StepSubs[$i], $Fonts.Small, (New-Object System.Drawing.Point((Px 45), ($y + (Px 23)))), (Hex '#6C6C6C'))
     }
 })
 
 # Main area: sized up front so anchors are measured against the real size.
 $main = New-Object System.Windows.Forms.Panel -Property @{ Dock = 'Fill'; Size = New-Object System.Drawing.Size(780, 680) }
 
-$search = New-Object System.Windows.Forms.Panel -Property @{ Left = 24; Top = 20; Width = 732; Height = 48; BackColor = Hex '#161A22'; Anchor = 'Top, Left, Right' }
-$search.Add_Paint({ param($s, $e) $e.Graphics.DrawRectangle((New-Object System.Drawing.Pen (Hex '#262C37')), 0, 0, $s.Width - 1, $s.Height - 1) })
-$searchIcon = New-Object System.Windows.Forms.PictureBox -Property @{ Left = 14; Top = 14; Size = New-Object System.Drawing.Size(20, 20); Image = New-SvgIcon $Icons.Search 20 '#5EB1FF' }
+$search = New-Object System.Windows.Forms.Panel -Property @{ Left = 24; Top = 20; Width = 732; Height = 48; BackColor = Hex '#232323'; Anchor = 'Top, Left, Right' }
+$search.Add_Paint({ param($s, $e) $e.Graphics.DrawRectangle((New-Object System.Drawing.Pen (Hex '#333333')), 0, 0, $s.Width - 1, $s.Height - 1) })
+$searchIcon = New-Object System.Windows.Forms.PictureBox -Property @{ Left = 14; Top = 14; Size = New-Object System.Drawing.Size(20, 20); Image = New-SvgIcon $Icons.Search 20 '#2A74E0' }
 $nameBox = New-Object System.Windows.Forms.TextBox -Property @{
     Left = 44; Top = 12; Width = 552; BorderStyle = 'None'; Font = $Fonts.Input; Anchor = 'Top, Left, Right'
-    BackColor = Hex '#161A22'; ForeColor = Hex '#E6E8EB'
+    BackColor = Hex '#232323'; ForeColor = Hex '#E0E0E0'
 }
 $scanBtn = New-Object System.Windows.Forms.Button -Property @{
     Text = "Scan"; Left = 612; Top = 5; Width = 114; Height = 38; Anchor = 'Top, Right'; FlatStyle = 'Flat'; Cursor = 'Hand'
-    BackColor = Hex '#1E2430'; ForeColor = Hex '#E6E8EB'; Font = $Fonts.Semi
+    BackColor = Hex '#2D2D2D'; ForeColor = Hex '#E0E0E0'; Font = $Fonts.Semi
 }
-$scanBtn.FlatAppearance.BorderColor = Hex '#2E3747'
+$scanBtn.FlatAppearance.BorderColor = Hex '#3D3D3D'
 $search.Controls.AddRange(@($searchIcon, $nameBox, $scanBtn))
 
-$bar = New-Object System.Windows.Forms.Panel -Property @{ Left = 24; Top = 76; Width = 732; Height = 3; BackColor = Hex '#1E232D'; Anchor = 'Top, Left, Right' }
-$barFill = New-Object System.Windows.Forms.Panel -Property @{ Left = 0; Top = 0; Width = 0; Height = 3; BackColor = Hex '#5EB1FF' }
+$bar = New-Object System.Windows.Forms.Panel -Property @{ Left = 24; Top = 76; Width = 732; Height = 3; BackColor = Hex '#282828'; Anchor = 'Top, Left, Right' }
+$barFill = New-Object System.Windows.Forms.Panel -Property @{ Left = 0; Top = 0; Width = 0; Height = 3; BackColor = Hex '#2A74E0' }
 $bar.Controls.Add($barFill)
 
-$list = New-Object System.Windows.Forms.ListView -Property @{
-    Left = 24; Top = 90; Width = 732; Height = 376; Anchor = 'Top, Bottom, Left, Right'
-    View = 'Details'; CheckBoxes = $true; FullRowSelect = $true; MultiSelect = $false; HeaderStyle = 'None'
-    OwnerDraw = $true; BorderStyle = 'None'; BackColor = Hex '#161A22'
-    SmallImageList = New-Object System.Windows.Forms.ImageList -Property @{ ImageSize = New-Object System.Drawing.Size(1, (Px 32)) }   # row height
-}
-[void]$list.Columns.Add("Item", 732)
-$list.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'NonPublic, Instance').SetValue($list, $true)
-$list.Add_Resize({ $list.Columns[0].Width = $list.ClientSize.Width })
+$list = New-OwnerList 32 @{ Left = 24; Top = 90; Width = 732; Height = 376; Anchor = 'Top, Bottom, Left, Right'; CheckBoxes = $true; BackColor = Hex '#232323' }
 $list.Add_DrawItem({ param($s, $e)
     $it = $e.Item; $b = $e.Bounds; $g = $e.Graphics; $hdr = -not $it.Tag
-    $bg = if ($it.Selected) { '#1E2430' } elseif ($hdr) { '#1A1F29' } else { '#161A22' }
+    $bg = if ($it.Selected) { '#2D2D2D' } elseif ($hdr) { '#282828' } else { '#232323' }
     $g.FillRectangle((New-Object System.Drawing.SolidBrush (Hex $bg)), $b)
     $g.SmoothingMode = 'AntiAlias'
     $box = New-Object System.Drawing.Rectangle(($b.X + (Px 6)), ($b.Y + [int](($b.Height - (Px 16)) / 2)), (Px 16), (Px 16))
     if ($it.Checked) {
-        $g.FillRectangle((New-Object System.Drawing.SolidBrush (Hex '#5EB1FF')), $box)
-        Draw-Svg $g $Icons.Check ($box.X + (Px 2)) ($box.Y + (Px 2)) (Px 12) '#0E1116' (Px 2)
-    } else { $g.DrawRectangle((New-Object System.Drawing.Pen (Hex '#3A4250')), $box) }
+        $g.FillRectangle((New-Object System.Drawing.SolidBrush (Hex '#2A74E0')), $box)
+        Draw-Svg $g $Icons.Check ($box.X + (Px 2)) ($box.Y + (Px 2)) (Px 12) '#FFFFFF' (Px 2)
+    } else { $g.DrawRectangle((New-Object System.Drawing.Pen (Hex '#4A4A4A')), $box) }
     $text = New-Object System.Drawing.Rectangle(($b.X + (Px 34)), $b.Y, ($b.Width - (Px 48)), $b.Height)
     $flags = [System.Windows.Forms.TextFormatFlags]'VerticalCenter, SingleLine, NoPrefix'
     if ($hdr) {
         $t = $Tags[$it.Name]
         [System.Windows.Forms.TextRenderer]::DrawText($g, $t.Tag, $Fonts.Tag, $text, (Hex $t.Color), $flags)
         $text.X += Px 50; $text.Width -= Px 50
-        [System.Windows.Forms.TextRenderer]::DrawText($g, $t.Group, $Fonts.Semi, $text, (Hex '#E6E8EB'), $flags)
+        [System.Windows.Forms.TextRenderer]::DrawText($g, $t.Group, $Fonts.Semi, $text, (Hex '#E0E0E0'), $flags)
         $n = @($list.Items | Where-Object { $_.Tag -and $_.Text -eq $it.Name }).Count
-        [System.Windows.Forms.TextRenderer]::DrawText($g, "$n", $Fonts.Mono, $text, (Hex '#6B7482'), $flags -bor 'Right')
+        [System.Windows.Forms.TextRenderer]::DrawText($g, "$n", $Fonts.Mono, $text, (Hex '#6C6C6C'), $flags -bor 'Right')
     } else {
-        $fg = if ($it.Checked) { '#E6E8EB' } else { '#6B7482' }
+        $fg = if ($it.Checked) { '#E0E0E0' } else { '#6C6C6C' }
         [System.Windows.Forms.TextRenderer]::DrawText($g, $it.SubItems[1].Text, $Fonts.Mono, $text, (Hex $fg), $flags -bor 'PathEllipsis')
     }
 })
@@ -423,28 +580,122 @@ $list.Add_ItemChecked({ param($s, $e)
     Update-Count
 })
 
+# Installed programs list: shown until a scan, in the same spot as the results.
+$apps = New-OwnerList 44 @{ Left = 24; Top = 90; Width = 732; Height = 376; Anchor = 'Top, Bottom, Left, Right'; BackColor = Hex '#232323' }
+# Where a program's icon can be found, best first:
+#   1. DisplayIcon ("C:\app.exe,0" or an .ico) - what "Apps & features" uses
+#   2. MSI installs: the product icon Windows Installer keeps (key is the GUID in "packed" order)
+#   3. an .exe in the install folder named like the program (Discord.exe, PacketTracer.exe)
+function Get-IconFiles($P) {
+    $file = "$($P.DisplayIcon)".Split(',')[0].Trim('"', ' ')
+    if ($file) { return $file }
+    if ($P.PSChildName -match '^\{[0-9A-F-]{36}\}$') {
+        $g = $P.PSChildName -replace '[{}-]'
+        $packed = (-join $g[7..0]) + (-join $g[11..8]) + (-join $g[15..12]) + (-join (16..31 | ForEach-Object { $g[$_ -bxor 1] }))
+        (Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\Installer\Products\$packed" -ErrorAction SilentlyContinue).ProductIcon
+    }
+    if ($P.InstallLocation -and (Test-Path -LiteralPath $P.InstallLocation)) {
+        $key = $P.DisplayName -replace '[^A-Za-z]'
+        Get-ChildItem -LiteralPath $P.InstallLocation -Filter *.exe -Recurse -Depth 2 -ErrorAction SilentlyContinue |
+            Where-Object { $_.BaseName.Length -ge 3 -and $key.IndexOf(($_.BaseName -replace '[^A-Za-z]'), [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } |
+            Select-Object -First 1 -ExpandProperty FullName
+    }
+}
+
+# Icons and sizes are filled by Start-ProgramDetails on a background thread; rows only read these.
+# $null = no icon anywhere (the row gets the plain App icon) or no size known.
+$IconCache = [hashtable]::Synchronized(@{})
+$SizeCache = [hashtable]::Synchronized(@{})
+function Get-ProgramIcon($P) {
+    if (-not $IconCache.ContainsKey($P.DisplayName)) {
+        $IconCache[$P.DisplayName] = $null
+        foreach ($file in @(Get-IconFiles $P)) {
+            if (-not $file -or -not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+            # .exe/.dll: extract. Anything else is an .ico (even without the extension, e.g. MSI "NodeIcon").
+            # Never open an exe as an .ico: it reads the whole file first (1-2 s for a 150 MB Electron app).
+            $ico = try {
+                if ($file -match '\.(exe|dll)$') { [System.Drawing.Icon]::ExtractAssociatedIcon($file) } else { New-Object System.Drawing.Icon($file) }
+            } catch { try { [System.Drawing.Icon]::ExtractAssociatedIcon($file) } catch { $null } }
+            if ($ico) { $IconCache[$P.DisplayName] = $ico; break }
+        }
+    }
+    $IconCache[$P.DisplayName]
+}
+# Size in MB: the registry's EstimatedSize, else measure the install folder once (IDM, OBS, VLC... skip EstimatedSize).
+function Get-ProgramSize($P) {
+    if ($P.EstimatedSize) { $SizeCache[$P.DisplayName] = $P.EstimatedSize / 1024 }
+    elseif (-not $SizeCache.ContainsKey($P.DisplayName)) {
+        $SizeCache[$P.DisplayName] = $null
+        $dir = "$($P.InstallLocation)".Trim('"', ' ')
+        # No InstallLocation: use the Program Files folder the icon lives in (bin\64bit\obs64.exe -> obs-studio).
+        if (-not $dir -and "$($P.DisplayIcon)" -match '[A-Z]:\\Program Files[^\\]*\\[^\\",]+') { $dir = $Matches[0] }
+        if ($dir -and $dir.TrimEnd('\').Split('\').Count -ge 3 -and (Test-Path -LiteralPath $dir -PathType Container)) {
+            $bytes = 0
+            try { foreach ($f in ([IO.DirectoryInfo]$dir).EnumerateFiles('*', 'AllDirectories')) { $bytes += $f.Length } } catch {}
+            if ($bytes) { $SizeCache[$P.DisplayName] = $bytes / 1MB }
+        }
+    }
+    $SizeCache[$P.DisplayName]
+}
+# Loads every program's icon and size on a background thread (~2-10 s, mostly disk), so the window never
+# freezes; the timer below repaints the list while it runs. Already-cached programs are skipped.
+function Start-ProgramDetails {
+    $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+    $rs.SessionStateProxy.SetVariable('IconCache', $IconCache)
+    $rs.SessionStateProxy.SetVariable('SizeCache', $SizeCache)
+    $defs = 'Get-IconFiles', 'Get-ProgramIcon', 'Get-ProgramSize' | ForEach-Object { "function $_ {$((Get-Item "function:$_").Definition)}" }
+    $ps = [powershell]::Create(); $ps.Runspace = $rs
+    [void]$ps.AddScript("Add-Type -AssemblyName System.Drawing`n" + ($defs -join "`n") + "`n" + 'foreach ($p in $args[0]) { [void](Get-ProgramIcon $p); [void](Get-ProgramSize $p) }').AddArgument($script:Programs)
+    $script:Loading = $ps.BeginInvoke()
+    $repaint.Start()
+}
+# Repaints the program list while the loader runs; stops itself when it's done.
+$repaint = New-Object System.Windows.Forms.Timer -Property @{ Interval = 250 }
+$repaint.Add_Tick({ $apps.Invalidate(); if ($script:Loading.IsCompleted) { $repaint.Stop() } })
+(New-Object Win32.AppRow -Property @{
+    Icons = $IconCache; Sizes = $SizeCache; Dpi = $Dpi; NoIcon = New-SvgIcon $Icons.App 24 '#6C6C6C'
+    Name = $Fonts.Semi; Small = $Fonts.Small; Mono = $Fonts.Mono
+    Back = Hex '#232323'; Selected = Hex '#2D2D2D'; Text = Hex '#E0E0E0'; Dim = Hex '#6C6C6C'
+}).Attach($apps)
+$apps.Add_DoubleClick({ if ($apps.SelectedItems.Count) { Select-Program $apps.SelectedItems[0].Tag } })
+
 $logWrap = New-Object System.Windows.Forms.Panel -Property @{
     Left = 24; Top = 480; Width = 732; Height = 112; Anchor = 'Bottom, Left, Right'
-    BackColor = Hex '#0A0C10'; Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 8)
+    BackColor = Hex '#121212'; Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 8)
 }
 $logBox = New-Object System.Windows.Forms.RichTextBox -Property @{
     Dock = 'Fill'; ReadOnly = $true; HideSelection = $false; BorderStyle = 'None'; ScrollBars = 'Vertical'
-    BackColor = Hex '#0A0C10'; ForeColor = Hex '#6B7482'; Font = $Fonts.Mono
-    Text = "Ready - type a program name, tick any extra drives, then press Scan.`r`n"
+    BackColor = Hex '#121212'; ForeColor = Hex '#6C6C6C'; Font = $Fonts.Mono
+    Text = "Ready - pick an installed program and press Scan, or type the name of one that's already uninstalled.`r`n"
 }
 $logWrap.Controls.Add($logBox)
 
-$countLabel = New-Object System.Windows.Forms.Label -Property @{ Text = "0 of 0 selected"; Left = 24; Top = 620; AutoSize = $true; Anchor = 'Bottom, Left'; Font = $Fonts.Mono; ForeColor = Hex '#9BA4B2' }
+$countLabel = New-Object System.Windows.Forms.Label -Property @{ Text = "0 of 0 selected"; Left = 24; Top = 620; AutoSize = $true; Anchor = 'Bottom, Left'; Font = $Fonts.Mono; ForeColor = Hex '#A0A0A0' }
 $cleanBtn = New-Object System.Windows.Forms.Button -Property @{
     Text = " Clean selected"; Left = 580; Top = 606; Width = 176; Height = 44; Anchor = 'Bottom, Right'; FlatStyle = 'Flat'; Cursor = 'Hand'
-    BackColor = Hex '#5EB1FF'; ForeColor = Hex '#0E1116'; Font = $Fonts.Semi
-    Image = New-SvgIcon $Icons.Trash 18 '#0E1116'; TextImageRelation = 'ImageBeforeText'
+    BackColor = Hex '#2A74E0'; ForeColor = Hex '#FFFFFF'; Font = $Fonts.Semi
+    Image = New-SvgIcon $Icons.Trash 18 '#FFFFFF'; TextImageRelation = 'ImageBeforeText'
 }
 $cleanBtn.FlatAppearance.BorderSize = 0
-$main.Controls.AddRange(@($search, $bar, $list, $logWrap, $countLabel, $cleanBtn))
+$backBtn = New-Object System.Windows.Forms.Button -Property @{
+    Text = " Back"; Left = 456; Top = 606; Width = 112; Height = 44; Anchor = 'Bottom, Right'; FlatStyle = 'Flat'; Cursor = 'Hand'
+    BackColor = Hex '#2D2D2D'; ForeColor = Hex '#E0E0E0'; Font = $Fonts.Semi
+    Image = New-SvgIcon $Icons.Back 18 '#E0E0E0'; TextImageRelation = 'ImageBeforeText'
+}
+$backBtn.FlatAppearance.BorderColor = Hex '#3D3D3D'
+$main.Controls.AddRange(@($search, $bar, $list, $apps, $logWrap, $countLabel, $backBtn, $cleanBtn))
 
-$scanBtn.Add_Click({ $scanBtn.Enabled = $cleanBtn.Enabled = $false; try { Invoke-Scan } finally { $scanBtn.Enabled = $cleanBtn.Enabled = $true } })
-$cleanBtn.Add_Click({ $scanBtn.Enabled = $cleanBtn.Enabled = $false; try { Invoke-Clean } finally { $scanBtn.Enabled = $cleanBtn.Enabled = $true } })
+# Scan and Clean are disabled while either runs, so a second click can't start another pass.
+function Busy([scriptblock]$Work) { $scanBtn.Enabled = $cleanBtn.Enabled = $false; try { & $Work } finally { $scanBtn.Enabled = $cleanBtn.Enabled = $true } }
+# Scan uses the selected program if there is one, otherwise the typed name (for leftovers of removed programs).
+$scanBtn.Add_Click({ Busy { if ($apps.Visible -and $apps.SelectedItems.Count) { Select-Program $apps.SelectedItems[0].Tag } else { Invoke-Scan } } })
+$nameBox.Add_TextChanged({ $script:Picked = $null; Show-Programs })
+$cleanBtn.Add_Click({ Busy { Invoke-Clean } })
+# Back to the program list: clearing the box shows every program again (TextChanged -> Show-Programs).
+$backBtn.Add_Click({
+    Set-Step 0 $StartSubs
+    if ($nameBox.Text) { $nameBox.Clear() } else { Show-Programs }
+})
 $drivesBtn.Add_Click({ Update-Drives })
 $form.AcceptButton = $scanBtn
 $form.Controls.AddRange(@($main, $side))   # Fill first: docking runs back to front
@@ -453,9 +704,17 @@ $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea   # scaled up it 
 $form.Size = New-Object System.Drawing.Size([Math]::Min($form.Width, $wa.Width), [Math]::Min($form.Height, $wa.Height))
 $form.StartPosition = 'Manual'   # the handle already exists, so CenterScreen would use the pre-scale size
 $form.Location = New-Object System.Drawing.Point(($wa.X + [int](($wa.Width - $form.Width) / 2)), ($wa.Y + [int](($wa.Height - $form.Height) / 2)))
-[void][Win32.Ui]::SetWindowTheme($list.Handle, "DarkMode_Explorer", $null)       # dark scrollbar
-[void][Win32.Ui]::SendMessage($nameBox.Handle, 0x1501, [IntPtr]1, "Program name, e.g. LM Studio")   # EM_SETCUEBANNER
+# ponytail: scrollbars stay light; Windows 10 ignores dark themes on these controls. Upgrade path: draw a custom scrollbar.
+[void][Win32.Ui]::SendMessage($nameBox.Handle, 0x1501, [IntPtr]1, "Search installed programs, or type a name")   # EM_SETCUEBANNER
 Update-Drives
+$script:Programs = @(Get-InstalledPrograms)
+Show-Programs
+# Invisible until every control has painted once, so the half-drawn window (white blocks) never shows.
+$form.Opacity = 0
+$form.Add_Shown({
+    $form.Refresh(); $form.Opacity = 1
+    Start-ProgramDetails   # after the first paint, so the loader doesn't slow it down
+})
 
 # Open the window only when run - not when dot-sourced, which is how the tests load the functions.
 if ($MyInvocation.InvocationName -ne '.') { [void]$form.ShowDialog() }
