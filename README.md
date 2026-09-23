@@ -1,4 +1,4 @@
-# 🚀 Universal Software Guardian (v2.5)
+# 🚀 Universal Software Guardian (v2.5.8)
 
 A powerful, high-performance Windows tool that completely uninstalls software and permanently removes every leftover file, folder and registry key it leaves behind.
 
@@ -6,20 +6,25 @@ It's a **one-window desktop app**: pick a program from your installed list (or t
 
 ## ✨ Features
 
-*   **📋 Installed Programs List** *(new in 2.5)*: the app opens on everything installed on your PC, the same list "Apps & features" shows, with each program's **icon, publisher, version and size**.
+*   **📋 Installed Programs List**: the app opens on everything installed on your PC, the same list "Apps & features" shows, with each program's **icon, publisher, version and size** (MB, or GB from 1024 MB).
     *   Type to filter it; double-click a program (or select it and press **Scan**) to start.
+    *   **Sort** it by name, size (biggest first) or newest install from the dropdown next to the search box *(2.5.8)*.
     *   Picking from the list also finds the program's own install folder, even when its name doesn't match.
     *   Still works for leftovers: type the name of a program that's already uninstalled and press **Scan**.
     *   **Back** returns to the list from the results.
+*   **📦 Remove Several at Once** *(2.5.8)*: **Ctrl+click** several programs, then press **Scan**. Each one gets its own Scan → review → Clean, and the next starts automatically after each clean.
+*   **🤫 Quiet Uninstall** *(2.5.8)*: when a program provides a silent uninstall command, or was installed with MSI, it's removed in the background with no wizard, and the app waits for it to finish. Other programs open their normal uninstaller.
+*   **🧹 Find Leftovers** *(2.5.8)*: lists folders in AppData, ProgramData and Program Files that no installed program or Store app claims and that haven't changed in 30 days: leftovers of programs removed long ago. They're a guess by name, so they come **unticked** for you to review.
+*   **📏 Space Freed** *(2.5.8)*: after a clean, the log and sidebar show how much space the deleted folders freed.
 *   **🖥️ One-Window App**: A dark "Night Sidebar" window in the style of CCleaner, in a neutral black theme.
     *   **Sidebar steps**: **Find → Review → Clean** light up as you go and finish with *verified clean*.
     *   **Grouped results**: Uninstallers, Folders and Registry keys, each with a colour tag and a count. Tick a group header to select or clear the whole group.
     *   **Live colour log**: every action is timestamped in the window and saved to `cleanup_log.txt`.
     *   Built with Windows' own fonts (Segoe UI, Cascadia Mono / Consolas) and vector icons, and stays sharp at 125% / 150% display scaling.
-    *   **Fast and smooth** *(2.5)*: icons and sizes load in the background, the list scrolls smoothly, and the window never appears half-drawn.
+    *   **Fast and smooth**: icons and sizes load in the background, the list scrolls smoothly, and the window never appears half-drawn.
 *   **🛡️ The Golden Rule (100% Parent Safety)**: Targets exactly the matching folder name. Parents and system directories (like `Program Files` or `AppData\Roaming`) are shielded and NEVER deleted, and personal folders (Documents, Downloads, Desktop, Pictures, Music, Videos) are always skipped.
 *   **🔨 The Cleanup Pipeline**:
-    1.  **Uninstaller**: Finds and launches the official manufacturer uninstaller.
+    1.  **Uninstaller**: Finds and runs the official manufacturer uninstaller, silently when it can.
     2.  **Universal File Sweep**: Scans `Program Files`, `ProgramData`, `AppData`, your user folder and any extra drives you pick, using direct .NET enumeration (about 10x faster than v1.0).
     3.  **Turbo .NET Registry Engine**: Direct registry parsing of `HKLM\Software` and `HKCU\Software`.
     4.  **Verification**: After cleaning it scans again, so the list shows exactly what is left.

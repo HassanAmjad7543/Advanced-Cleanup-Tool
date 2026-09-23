@@ -203,13 +203,21 @@ function Add-MatchingFolders([string]$TargetPath) {
 }
 
 # Results arrive grouped by type, so a type's header row (Name = type, no Tag) goes in before its first item.
-function Add-Result([string]$Type, [string]$Text, [string]$Value = $Text) {
-    if (-not $list.Items.ContainsKey($Type)) { $list.Items.Add($Type, $Tags[$Type].Group, -1).Checked = $true }
+# Value: a path or key, or for an uninstaller its registry entry. Leftover guesses come in unticked.
+function Add-Result([string]$Type, [string]$Text, $Value = $Text, [bool]$Checked = $true) {
+    if (-not $list.Items.ContainsKey($Type)) { $list.Items.Add($Type, $Tags[$Type].Group, -1).Checked = $Checked }
     $item = $list.Items.Add($Type)
     [void]$item.SubItems.Add($Text)
     $item.Tag = $Value
-    $item.Checked = $true
+    $item.Checked = $Checked
 }
+
+function Get-FolderBytes([string]$Dir) {
+    $bytes = 0
+    try { foreach ($f in ([IO.DirectoryInfo]$Dir).EnumerateFiles('*', 'AllDirectories')) { $bytes += $f.Length } } catch {}
+    $bytes
+}
+function Format-Size([double]$Bytes) { if ($Bytes -ge 1GB) { '{0:N1} GB' -f ($Bytes / 1GB) } else { '{0:N0} MB' -f [Math]::Max(1, $Bytes / 1MB) } }
 
 # Windows' "installed programs" lists (64-bit, 32-bit, current user).
 $UninstallKeys = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
@@ -226,18 +234,72 @@ function Get-InstalledPrograms {
 # Fills the program list with the programs whose name contains the search text.
 function Show-Programs {
     $f = $nameBox.Text.Trim()
+    $sorted = switch ($script:SortBy) {
+        'Size'   { $Programs | Sort-Object { [double]$SizeCache[$_.DisplayName] } -Descending }   # unknown sizes last
+        'Newest' { $Programs | Sort-Object InstallDate -Descending }                             # yyyyMMdd, so text order works
+        default  { $Programs }                                                                   # already by name
+    }
     $apps.BeginUpdate(); $apps.Items.Clear()
-    foreach ($p in $Programs) {
+    foreach ($p in $sorted) {
         if ($p.DisplayName.IndexOf($f, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $it = $apps.Items.Add($p.DisplayName); $it.Tag = $p
             [void]$it.SubItems.Add(((@($p.Publisher, $p.DisplayVersion) | Where-Object { $_ }) -join '   '))   # the row's second line
         }
     }
     $apps.EndUpdate()
-    # Program screen: only Scan applies here, so Clean and Back stay hidden.
-    $list.Visible = $cleanBtn.Visible = $backBtn.Visible = $false; $apps.Visible = $true
-    $scanBtn.Text = "Scan"
-    $countLabel.Text = "$($apps.Items.Count) installed - double-click one, or select it and press Scan"
+    # Program screen: Scan, Sort and Find leftovers apply here; Clean and Back belong to the results.
+    $list.Visible = $cleanBtn.Visible = $backBtn.Visible = $false; $apps.Visible = $sortBox.Visible = $leftBtn.Visible = $true
+    $scanBtn.Text = "Scan"; $script:Leftovers = $false
+    $countLabel.Text = "$($apps.Items.Count) installed - Ctrl+click to pick several"
+}
+
+# Results screen: swaps the program list and its buttons for the results and Back / Clean.
+function Show-Results {
+    $list.Items.Clear(); $apps.Visible = $sortBox.Visible = $leftBtn.Visible = $false; $list.Visible = $cleanBtn.Visible = $backBtn.Visible = $true
+    $scanBtn.Text = "Rescan"
+}
+
+# Several programs picked (Ctrl+click): each gets its own Scan -> review -> Clean, one after another.
+function Start-Queue($Picks) { $script:Queue = @($Picks); $script:QueueTotal = $script:Queue.Count; Select-Next }
+function Select-Next {
+    $p = $script:Queue[0]; $script:Queue = @($script:Queue | Select-Object -Skip 1)
+    if ($script:QueueTotal -gt 1) { Write-Log "Program $($script:QueueTotal - $script:Queue.Count) of $($script:QueueTotal): $($p.DisplayName)" "Cyan" }
+    Select-Program $p
+}
+
+# Folders in the usual install places that no installed program claims: leftovers of programs
+# removed long ago. It's a guess by name, so they're listed unticked for you to review.
+# Folders changed in the last 30 days are skipped: something still uses them.
+# ponytail: matched on the letters of program names, publishers and install folders; a vendor folder
+# with an unrelated name shows up as a false hit. Upgrade path: a list of known Windows/vendor folders.
+$SystemDirRx = [regex]::new('^(Microsoft|Windows|Package|regid\.|USO|ssh$|Comms$|ConnectedDevicesPlatform|CrashDumps|D3DSCache|Publishers|PeerDistRepub|History$|VirtualStore|IsolatedStorage|NuGet|dotnet|Reference Assemblies|MSBuild|ModifiableWindowsApps|PowerShell|Programs$|SoftwareGuardian|SoftwareDistribution|Uninstall Information|RUXIM|Deployment$|(Elevated)?Diagnostics$|PlaceholderTileLogoFolder|ToastNotificationManagerCompat|speech$|Backup$|Apps$|State$|User Data$|cache$|SquirrelTemp|ProductData|\{?[0-9A-F]{8}-[0-9A-F-]{27}\}?$)', 'IgnoreCase')
+function Find-Leftovers {
+    Show-Results; $script:Leftovers = $true
+    Write-Log "========== LEFTOVERS: folders no installed program claims ==========" "Cyan"
+    # What claims a folder: program names and publishers, the last folder and file names of their install,
+    # icon and uninstaller paths ("...\Internet Download Manager\IDMan.exe" claims "IDM"), and Store apps.
+    $keys = @(foreach ($p in $Programs) {
+            $p.DisplayName; $p.Publisher
+            foreach ($path in $p.InstallLocation, $p.DisplayIcon, $p.UninstallString) { @("$path" -split '[\\"]' | Where-Object { $_ } | Select-Object -Last 2) -replace '\.(exe|ico|dll).*$' }
+        }
+        (Get-AppxPackage -ErrorAction SilentlyContinue).Name) |
+        ForEach-Object { ("$_" -replace '[^A-Za-z]').ToLower() } | Where-Object { $_.Length -ge 3 } | Sort-Object -Unique
+    # One string and one regex instead of a loop per folder: "folder is part of a key" / "a key is part of the folder".
+    $joined = '|' + ($keys -join '|') + '|'
+    $keyRx = [regex]::new(($keys -join '|'))
+    $n = 0; $recent = (Get-Date).AddDays(-30)
+    $roots = $env:APPDATA, $env:LOCALAPPDATA, $env:ProgramData, $env:ProgramFiles, ${env:ProgramFiles(x86)}
+    for ($i = 0; $i -lt $roots.Count; $i++) {
+        $barFill.Width = [int]($bar.Width * ($i + 1) / $roots.Count); [System.Windows.Forms.Application]::DoEvents()   # once per root
+        foreach ($d in Get-ChildItem -LiteralPath $roots[$i] -Directory -Force -ErrorAction SilentlyContinue) {
+            $k = ($d.Name -replace '[^A-Za-z]').ToLower()
+            if ($k.Length -lt 3 -or $d.LastWriteTime -gt $recent -or ($d.Attributes -band 'ReparsePoint') -or $Excl.Contains($d.Name) -or $SystemDirRx.IsMatch($d.Name)) { continue }
+            if (-not $joined.Contains($k) -and -not $keyRx.IsMatch($k)) { Add-Result "Folder" $d.FullName -Checked $false; $n++ }
+        }
+    }
+    $barFill.Width = 0; Update-Count
+    Set-Step $(if ($n) { 1 } else { 0 }) @('leftovers', "$n found", 'then verify')
+    Write-Log $(if ($n) { "Found $n folder(s) no installed program claims. They're unticked: tick only what you recognise, then click Clean." } else { "No leftovers found." }) $(if ($n) { "Yellow" } else { "Green" })
 }
 
 # Scans for a program picked from the list, searching by its name without the version.
@@ -269,8 +331,7 @@ function Update-Drives {
 function Invoke-Scan {
     $name = $nameBox.Text.Trim()
     if ($name.Length -lt 3) { [void][System.Windows.Forms.MessageBox]::Show("Type at least 3 letters of the program name.", $form.Text); return }
-    $list.Items.Clear(); $apps.Visible = $false; $list.Visible = $cleanBtn.Visible = $backBtn.Visible = $true
-    $scanBtn.Text = "Rescan"
+    Show-Results
     # Spaces, hyphens and underscores match each other, so "LM Studio" also finds ".lmstudio".
     $pattern = [regex]::Escape($name) -replace '(\\ |-|_)+', '[\s\-_]*'
     $StrictRegex = "(?i)\b$pattern"
@@ -279,7 +340,7 @@ function Invoke-Scan {
 
     Get-ItemProperty $UninstallKeys -ErrorAction SilentlyContinue |
         Where-Object { $_.UninstallString -and (($_.DisplayName -match $StrictRegex) -or ($_.Publisher -match $StrictRegex)) } |
-        ForEach-Object { Add-Result "Uninstaller" $_.DisplayName $_.UninstallString }
+        ForEach-Object { Add-Result "Uninstaller" $_.DisplayName $_ }
 
     $searchRoots = @("$env:ProgramFiles", "${env:ProgramFiles(x86)}", "$env:ProgramData",
                      "$env:APPDATA", "$env:LOCALAPPDATA", "$env:USERPROFILE") +
@@ -336,25 +397,49 @@ function Invoke-Scan {
 # folders, then scans again so the list shows exactly what is left.
 function Invoke-Clean {
     $items = @($list.CheckedItems | Where-Object Tag)
-    if (-not $items -or -not (Ask "Remove the $($items.Count) ticked item(s)? Folders and registry keys are deleted permanently.")) { return }
-    $name = $nameBox.Text.Trim()
+    if (-not $items) { if ($script:Queue) { Select-Next }; return }   # nothing to remove: on to the next picked program
+    if (-not (Ask "Remove the $($items.Count) ticked item(s)? Folders and registry keys are deleted permanently.")) { return }
+    $name = if ($script:Leftovers) { 'leftovers' } else { $nameBox.Text.Trim() }
     Set-Step 2 @($name, "$($items.Count) picked", 'in progress')
-    foreach ($it in $items | Where-Object Text -eq 'Uninstaller') {
-        Write-Log "Launching uninstaller: $($it.SubItems[1].Text)" "Cyan"
-        Start-Process cmd.exe -ArgumentList "/c `"$($it.Tag)`""
-        [void][System.Windows.Forms.MessageBox]::Show("Click OK once the $($it.SubItems[1].Text) uninstaller has completely finished.", $form.Text)
-    }
-    $locked = @(foreach ($it in $items | Where-Object Text -eq 'Folder') { if (-not (Force-DeleteFolder $it.Tag)) { $it.Tag } })
+    foreach ($it in $items | Where-Object Text -eq 'Uninstaller') { Invoke-Uninstaller $it.Tag }
+    $freed = 0
+    $locked = @(foreach ($it in $items | Where-Object Text -eq 'Folder') {
+        $bytes = Get-FolderBytes $it.Tag   # measured first: afterwards there's nothing left to measure
+        if (Force-DeleteFolder $it.Tag) { $freed += $bytes } else { $it.Tag }
+    })
     foreach ($it in $items | Where-Object Text -eq 'Registry') { [void](Force-DeleteRegistryKey $it.Tag) }
     if ($locked -and (Ask "$($locked.Count) folder(s) are locked and could not be deleted. Delete them automatically at the next restart?")) {
         foreach ($f in $locked) { Register-DeleteOnReboot $f }
     }
-    Write-Log "Verifying - scanning again..." "Yellow"
-    Invoke-Scan
-    $left = @($list.Items | Where-Object Tag).Count
-    Set-Step 3 @($name, "$($items.Count) picked", $(if ($left) { "$left still found" } else { 'verified clean' }))
+    if ($freed) { Write-Log "Freed $(Format-Size $freed) from deleted folders." "Green" }
     $script:Programs = @(Get-InstalledPrograms)   # the uninstalled program drops off the list
+    Write-Log "Verifying - scanning again..." "Yellow"
+    if ($script:Leftovers) { Find-Leftovers } else { Invoke-Scan }
+    # Leftovers come back unticked, so there "left" means: ticked folders that still exist.
+    $left = if ($script:Leftovers) { @($items | Where-Object { Test-Path -LiteralPath $_.Tag }).Count } else { @($list.Items | Where-Object Tag).Count }
+    Set-Step 3 @($name, $(if ($freed) { "$(Format-Size $freed) freed" } else { "$($items.Count) picked" }), $(if ($left) { "$left still found" } else { 'verified clean' }))
     Start-ProgramDetails
+    if ($script:Queue) { Select-Next }
+}
+
+# Runs a program's uninstaller. Silent when Windows knows how - the program's QuietUninstallString,
+# or msiexec /qn for MSI installs - and then waits for it; otherwise opens it and asks you to say when done.
+# ponytail: NSIS/Inno "/S" switches are not guessed; a wrong guess can hang or open the normal wizard.
+function Invoke-Uninstaller($U) {
+    $quiet = if ($U.QuietUninstallString) { $U.QuietUninstallString }
+             elseif ($U.UninstallString -match 'msiexec.*?(\{[0-9A-Fa-f-]{36}\})') { "msiexec.exe /x $($Matches[1]) /qn /norestart" }
+    if ($quiet) {
+        Write-Log "Uninstalling silently: $($U.DisplayName)" "Cyan"
+        $p = Start-Process cmd.exe -ArgumentList "/c `"$quiet`"" -WindowStyle Hidden -PassThru
+        while (-not $p.HasExited) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }   # keep the window alive
+        # msiexec: 0 done, 3010 done but needs a restart, 1605 already gone
+        $color = if ($p.ExitCode -in 0, 3010, 1605) { "Green" } else { "Red" }
+        Write-Log "  Uninstaller finished (exit code $($p.ExitCode))$(if ($p.ExitCode -eq 3010) { ' - restart to finish' })." $color
+    } else {
+        Write-Log "Launching uninstaller: $($U.DisplayName)" "Cyan"
+        Start-Process cmd.exe -ArgumentList "/c `"$($U.UninstallString)`""
+        [void][System.Windows.Forms.MessageBox]::Show("Click OK once the $($U.DisplayName) uninstaller has completely finished.", $form.Text)
+    }
 }
 
 # ---- Window: design A "Night Sidebar" ----
@@ -366,6 +451,36 @@ public static class Ui {
     [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, string l);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool MoveFileEx(string src, string dst, int flags);
+}
+// A dropdown list in the dark theme. The closed box is painted entirely here, double-buffered: Windows'
+// own paint (white border/arrow, light hover) would flash through before any paint-over.
+public class DarkCombo : ComboBox {
+    public Color Border, Accent, Hover;
+    bool hot;
+    public DarkCombo() {
+        DrawMode = DrawMode.OwnerDrawFixed; DropDownStyle = ComboBoxStyle.DropDownList; FlatStyle = FlatStyle.Flat;
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+    }
+    protected override void OnMouseEnter(EventArgs e) { hot = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { hot = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnSelectedIndexChanged(EventArgs e) { Invalidate(); base.OnSelectedIndexChanged(e); }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics; Rectangle r = ClientRectangle; int a = Font.Height / 4;
+        using (SolidBrush bg = new SolidBrush(hot ? Hover : BackColor)) g.FillRectangle(bg, r);
+        using (Pen p = new Pen(hot ? Accent : Border)) g.DrawRectangle(p, 0, 0, r.Width - 1, r.Height - 1);
+        Rectangle t = new Rectangle(Font.Height / 3, 0, r.Width - Font.Height * 2, r.Height);
+        TextRenderer.DrawText(g, Text, Font, t, ForeColor, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        float cx = r.Right - Font.Height * 0.8f, cy = r.Height / 2f;
+        using (Pen p = new Pen(ForeColor, a / 2.5f)) g.DrawLines(p, new[] { new PointF(cx - a, cy - a / 2f), new PointF(cx, cy + a / 2f), new PointF(cx + a, cy - a / 2f) });
+    }
+    protected override void OnDrawItem(DrawItemEventArgs e) {
+        if (e.Index < 0) return;
+        bool hot = (e.State & DrawItemState.Selected) != 0 && (e.State & DrawItemState.ComboBoxEdit) == 0;   // not the closed box
+        using (SolidBrush b = new SolidBrush(hot ? Accent : BackColor)) e.Graphics.FillRectangle(b, e.Bounds);
+        Rectangle t = new Rectangle(e.Bounds.X + Font.Height / 3, e.Bounds.Y, e.Bounds.Width, e.Bounds.Height);
+        TextRenderer.DrawText(e.Graphics, Items[e.Index].ToString(), Font, t, ForeColor, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+    }
 }
 // Draws a program row: icon, name on top, publisher and version below, size on the right.
 // C#, not PowerShell: each PowerShell statement costs ~1 ms here, so a row took ~20 ms and scrolling stuttered.
@@ -379,7 +494,7 @@ public class AppRow {
     [DllImport("user32.dll")] static extern bool DrawIconEx(IntPtr dc, int x, int y, IntPtr icon, int w, int h, int step, IntPtr brush, int flags);
     public Hashtable Icons, Sizes;          // filled by the background loader, keyed by program name
     public Image NoIcon; public Font Name, Small, Mono; public float Dpi = 1;
-    public Color Back, Selected, Text, Dim;
+    public Color Back, Selected, Accent, Text, Dim;
     Dictionary<string, IntPtr> cache = new Dictionary<string, IntPtr>();   // key -> HBITMAP of the drawn row
     IntPtr mem = CreateCompatibleDC(IntPtr.Zero);
     int Px(float v) { return (int)(v * Dpi); }
@@ -404,6 +519,7 @@ public class AppRow {
     }
     void Paint(Graphics g, Rectangle b, ListViewItem it, Icon ico, object mb) {
         using (SolidBrush bg = new SolidBrush(it.Selected ? Selected : Back)) g.FillRectangle(bg, b);
+        if (it.Selected) using (SolidBrush bar = new SolidBrush(Accent)) g.FillRectangle(bar, b.X, b.Y, Px(3), b.Height);   // picked rows stand out
         int size = Px(28);
         Rectangle icon = new Rectangle(b.X + Px(14), b.Y + (b.Height - size) / 2, size, size);
         if (ico != null) {
@@ -427,7 +543,9 @@ public class AppRow {
         if (it.SubItems.Count > 1) TextRenderer.DrawText(g, it.SubItems[1].Text, Small, bottom, Dim, f);
         if (mb != null) {
             Rectangle right = new Rectangle(b.X, b.Y, b.Width - Px(14), b.Height);
-            TextRenderer.DrawText(g, string.Format("{0:N0} MB", Math.Max(1.0, Convert.ToDouble(mb))), Mono, right, Dim,
+            double total = Math.Max(1.0, Convert.ToDouble(mb));   // MB; 1024 MB and up reads as GB
+            string shown = total >= 1024 ? string.Format("{0:N1} GB", total / 1024) : string.Format("{0:N0} MB", total);
+            TextRenderer.DrawText(g, shown, Mono, right, Dim,
                                   f | TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
         }
     }
@@ -503,6 +621,7 @@ $side.Controls.AddRange(@($logo, $title, $stepsLabel, $stepsPanel, $drivesLabel,
 
 $StartSubs = 'pick a program', 'untick what to keep', 'then verify'
 $script:StepNow = 0; $script:StepSubs = $StartSubs
+$script:SortBy = 'Name'; $script:Queue = @()
 $stepsPanel.Add_Paint({ param($s, $e)
     $g = $e.Graphics; $g.SmoothingMode = 'AntiAlias'
     $names = 'Find', 'Review', 'Clean'
@@ -534,7 +653,7 @@ $search = New-Object System.Windows.Forms.Panel -Property @{ Left = 24; Top = 20
 $search.Add_Paint({ param($s, $e) $e.Graphics.DrawRectangle((New-Object System.Drawing.Pen (Hex '#333333')), 0, 0, $s.Width - 1, $s.Height - 1) })
 $searchIcon = New-Object System.Windows.Forms.PictureBox -Property @{ Left = 14; Top = 14; Size = New-Object System.Drawing.Size(20, 20); Image = New-SvgIcon $Icons.Search 20 '#2A74E0' }
 $nameBox = New-Object System.Windows.Forms.TextBox -Property @{
-    Left = 44; Top = 12; Width = 552; BorderStyle = 'None'; Font = $Fonts.Input; Anchor = 'Top, Left, Right'
+    Left = 44; Top = 12; Width = 412; BorderStyle = 'None'; Font = $Fonts.Input; Anchor = 'Top, Left, Right'
     BackColor = Hex '#232323'; ForeColor = Hex '#E0E0E0'
 }
 $scanBtn = New-Object System.Windows.Forms.Button -Property @{
@@ -542,7 +661,13 @@ $scanBtn = New-Object System.Windows.Forms.Button -Property @{
     BackColor = Hex '#2D2D2D'; ForeColor = Hex '#E0E0E0'; Font = $Fonts.Semi
 }
 $scanBtn.FlatAppearance.BorderColor = Hex '#3D3D3D'
-$search.Controls.AddRange(@($searchIcon, $nameBox, $scanBtn))
+# Sort order for the program list; only shown on the program screen.
+$sortBox = New-Object Win32.DarkCombo -Property @{
+    Left = 468; Top = 9; Width = 132; Anchor = 'Top, Right'; ItemHeight = Px 24; Cursor = 'Hand'
+    BackColor = Hex '#2D2D2D'; ForeColor = Hex '#E0E0E0'; Border = Hex '#3D3D3D'; Accent = Hex '#2A74E0'; Hover = Hex '#333333'; Font = $Fonts.Semi
+}
+$sortBox.Items.AddRange(@('Sort: Name', 'Sort: Size', 'Sort: Newest')); $sortBox.SelectedIndex = 0
+$search.Controls.AddRange(@($searchIcon, $nameBox, $sortBox, $scanBtn))
 
 $bar = New-Object System.Windows.Forms.Panel -Property @{ Left = 24; Top = 76; Width = 732; Height = 3; BackColor = Hex '#282828'; Anchor = 'Top, Left, Right' }
 $barFill = New-Object System.Windows.Forms.Panel -Property @{ Left = 0; Top = 0; Width = 0; Height = 3; BackColor = Hex '#2A74E0' }
@@ -630,8 +755,7 @@ function Get-ProgramSize($P) {
         # No InstallLocation: use the Program Files folder the icon lives in (bin\64bit\obs64.exe -> obs-studio).
         if (-not $dir -and "$($P.DisplayIcon)" -match '[A-Z]:\\Program Files[^\\]*\\[^\\",]+') { $dir = $Matches[0] }
         if ($dir -and $dir.TrimEnd('\').Split('\').Count -ge 3 -and (Test-Path -LiteralPath $dir -PathType Container)) {
-            $bytes = 0
-            try { foreach ($f in ([IO.DirectoryInfo]$dir).EnumerateFiles('*', 'AllDirectories')) { $bytes += $f.Length } } catch {}
+            $bytes = Get-FolderBytes $dir
             if ($bytes) { $SizeCache[$P.DisplayName] = $bytes / 1MB }
         }
     }
@@ -643,7 +767,7 @@ function Start-ProgramDetails {
     $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
     $rs.SessionStateProxy.SetVariable('IconCache', $IconCache)
     $rs.SessionStateProxy.SetVariable('SizeCache', $SizeCache)
-    $defs = 'Get-IconFiles', 'Get-ProgramIcon', 'Get-ProgramSize' | ForEach-Object { "function $_ {$((Get-Item "function:$_").Definition)}" }
+    $defs = 'Get-IconFiles', 'Get-ProgramIcon', 'Get-ProgramSize', 'Get-FolderBytes' | ForEach-Object { "function $_ {$((Get-Item "function:$_").Definition)}" }
     $ps = [powershell]::Create(); $ps.Runspace = $rs
     [void]$ps.AddScript("Add-Type -AssemblyName System.Drawing`n" + ($defs -join "`n") + "`n" + 'foreach ($p in $args[0]) { [void](Get-ProgramIcon $p); [void](Get-ProgramSize $p) }').AddArgument($script:Programs)
     $script:Loading = $ps.BeginInvoke()
@@ -651,13 +775,18 @@ function Start-ProgramDetails {
 }
 # Repaints the program list while the loader runs; stops itself when it's done.
 $repaint = New-Object System.Windows.Forms.Timer -Property @{ Interval = 250 }
-$repaint.Add_Tick({ $apps.Invalidate(); if ($script:Loading.IsCompleted) { $repaint.Stop() } })
+$repaint.Add_Tick({
+    $apps.Invalidate()
+    # All sizes known now: re-sort, unless you've already picked programs (rebuilding would drop them).
+    if ($script:Loading.IsCompleted) { $repaint.Stop(); if ($apps.Visible -and $script:SortBy -eq 'Size' -and -not $apps.SelectedItems.Count) { Show-Programs } }
+})
 (New-Object Win32.AppRow -Property @{
     Icons = $IconCache; Sizes = $SizeCache; Dpi = $Dpi; NoIcon = New-SvgIcon $Icons.App 24 '#6C6C6C'
     Name = $Fonts.Semi; Small = $Fonts.Small; Mono = $Fonts.Mono
-    Back = Hex '#232323'; Selected = Hex '#2D2D2D'; Text = Hex '#E0E0E0'; Dim = Hex '#6C6C6C'
+    Back = Hex '#232323'; Selected = Hex '#2D2D2D'; Accent = Hex '#2A74E0'; Text = Hex '#E0E0E0'; Dim = Hex '#6C6C6C'
 }).Attach($apps)
-$apps.Add_DoubleClick({ if ($apps.SelectedItems.Count) { Select-Program $apps.SelectedItems[0].Tag } })
+$apps.MultiSelect = $true   # Ctrl/Shift+click picks several programs to remove one after another
+$apps.Add_DoubleClick({ if ($apps.SelectedItems.Count) { Busy { Start-Queue $apps.SelectedItems[0].Tag } } })
 
 $logWrap = New-Object System.Windows.Forms.Panel -Property @{
     Left = 24; Top = 480; Width = 732; Height = 112; Anchor = 'Bottom, Left, Right'
@@ -683,17 +812,29 @@ $backBtn = New-Object System.Windows.Forms.Button -Property @{
     Image = New-SvgIcon $Icons.Back 18 '#E0E0E0'; TextImageRelation = 'ImageBeforeText'
 }
 $backBtn.FlatAppearance.BorderColor = Hex '#3D3D3D'
-$main.Controls.AddRange(@($search, $bar, $list, $apps, $logWrap, $countLabel, $backBtn, $cleanBtn))
+# Program screen button, in the same spot as Clean on the results screen.
+$leftBtn = New-Object System.Windows.Forms.Button -Property @{
+    Text = " Find leftovers"; Left = 580; Top = 606; Width = 176; Height = 44; Anchor = 'Bottom, Right'; FlatStyle = 'Flat'; Cursor = 'Hand'
+    BackColor = Hex '#2D2D2D'; ForeColor = Hex '#E0E0E0'; Font = $Fonts.Semi
+    Image = New-SvgIcon $Icons.Search 18 '#E0E0E0'; TextImageRelation = 'ImageBeforeText'
+}
+$leftBtn.FlatAppearance.BorderColor = Hex '#3D3D3D'
+$main.Controls.AddRange(@($search, $bar, $list, $apps, $logWrap, $countLabel, $backBtn, $cleanBtn, $leftBtn))
 
 # Scan and Clean are disabled while either runs, so a second click can't start another pass.
 function Busy([scriptblock]$Work) { $scanBtn.Enabled = $cleanBtn.Enabled = $false; try { & $Work } finally { $scanBtn.Enabled = $cleanBtn.Enabled = $true } }
 # Scan uses the selected program if there is one, otherwise the typed name (for leftovers of removed programs).
-$scanBtn.Add_Click({ Busy { if ($apps.Visible -and $apps.SelectedItems.Count) { Select-Program $apps.SelectedItems[0].Tag } else { Invoke-Scan } } })
+$scanBtn.Add_Click({ Busy {
+    if ($apps.Visible -and $apps.SelectedItems.Count) { Start-Queue ($apps.SelectedItems | ForEach-Object Tag) }
+    elseif ($script:Leftovers) { Find-Leftovers } else { Invoke-Scan }
+} })
+$sortBox.Add_SelectedIndexChanged({ $script:SortBy = ('Name', 'Size', 'Newest')[$sortBox.SelectedIndex]; Show-Programs })
+$leftBtn.Add_Click({ Busy { Find-Leftovers } })
 $nameBox.Add_TextChanged({ $script:Picked = $null; Show-Programs })
 $cleanBtn.Add_Click({ Busy { Invoke-Clean } })
 # Back to the program list: clearing the box shows every program again (TextChanged -> Show-Programs).
 $backBtn.Add_Click({
-    Set-Step 0 $StartSubs
+    Set-Step 0 $StartSubs; $script:Queue = @()   # also drops any programs still waiting
     if ($nameBox.Text) { $nameBox.Clear() } else { Show-Programs }
 })
 $drivesBtn.Add_Click({ Update-Drives })

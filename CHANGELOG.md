@@ -2,6 +2,27 @@
 
 All notable changes to Universal Software Guardian are listed here.
 
+## [2.5.8] - 2026-09-24
+
+v2.5.8 adds sorting, removing several programs in one go, silent uninstalls, a leftover finder and a space-freed report.
+
+### Added
+- **Sort dropdown** next to the search box: by name, by size (biggest first) or newest install first.
+- **Remove several programs at once**: Ctrl+click them and press Scan. Each gets its own Scan → review → Clean, and the next one starts automatically after each clean. Back cancels the rest. Picked rows are marked with a blue bar.
+- **Quiet uninstall**: a program's own `QuietUninstallString`, or `msiexec /x {GUID} /qn` for MSI installs, runs hidden and the app waits for it (exit code logged, including "restart to finish"). Other programs still open their normal uninstaller. NSIS/Inno `/S` switches are not guessed.
+- **Find leftovers** button: lists folders in AppData, ProgramData and Program Files that no installed program, publisher, install path or Store app claims, and that haven't changed in 30 days. They come in **unticked** for review. Known Windows folders are skipped.
+- **Space freed**: folders are measured before deletion. The log shows "Freed 1.2 GB" and the sidebar shows it under Clean.
+
+### Changed
+- Program sizes of 1024 MB and up show as GB (e.g. 3.0 GB).
+- The sort control and dropdown list are drawn in the dark theme (no white border or white flash on hover).
+- The three lists share one setup helper, and `MoveFileEx` is compiled with the rest of the C# (once, cached in `%TEMP%`).
+- The repaint timer only runs while icons are loading.
+
+### Fixed
+- "N of M selected" was off by one after finding leftovers.
+- Sorting by size no longer drops programs you already picked when sizes finish loading.
+
 ## [2.5] - 2026-09-23
 
 v2.5 lets you pick the program to remove from a list instead of typing its name, and makes the window faster and smoother.
