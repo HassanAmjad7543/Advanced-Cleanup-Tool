@@ -1,0 +1,27 @@
+# User-specific logs
+cleanup_log.txt
+
+# Build output of build.ps1
+SoftwareGuardian.exe
+
+# PowerShell temporary files
+*.log
+*.tmp
+*.bak
+
+# Windows-specific files
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# VS Code settings (if you use it)
+.vscode/
+
+# Project-specific metadata (optional)
+.antigravity/
+.gemini/
+
+# Local tooling and scratch output (not part of the app)
+.claude/
+graphify-out/
+cleanup_log*.txt
